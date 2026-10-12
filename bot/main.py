@@ -95,6 +95,28 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 
+# @bot.event
+# async def on_message(message):
+#     """Runs for EVERY new message the bot can see. This is the core of the project."""
+
+#     # Ignore messages written by bots (including our own bot).
+#     if message.author.bot:
+#         return
+
+#     # Ignore direct messages (DMs). We only want messages inside servers.
+#     if message.guild is None:
+#         return
+
+#     # For now we just print the message info in the terminal.
+#     # Later, instead of printing, we will save these same values in a database.
+#     print("-" * 40)
+#     print("Server:  ", message.guild.name, f"({message.guild.id})")
+#     print("Channel: ", message.channel.name, f"({message.channel.id})")
+#     print("Author:  ", message.author.name, f"({message.author.id})")
+#     print("Time:    ", message.created_at)
+#     print("Content: ", message.content)
+
+
 @bot.event
 async def on_message(message):
     """Runs for EVERY new message the bot can see. This is the core of the project."""
@@ -107,14 +129,39 @@ async def on_message(message):
     if message.guild is None:
         return
 
-    # For now we just print the message info in the terminal.
-    # Later, instead of printing, we will save these same values in a database.
-    print("-" * 40)
-    print("Server:  ", message.guild.name, f"({message.guild.id})")
-    print("Channel: ", message.channel.name, f"({message.channel.id})")
-    print("Author:  ", message.author.name, f"({message.author.id})")
-    print("Time:    ", message.created_at)
-    print("Content: ", message.content)
+    # Save the message in the database.
+    # try/except: if saving fails for any reason, we print the error
+    # instead of letting the whole bot crash.
+    try:
+        # INSERT INTO ... VALUES adds one new row to the table.
+        #
+        # $1, $2, ... are placeholders: empty slots that get filled with the
+        # values listed after the SQL text, in the same order ($1 = first value...).
+        # The values are sent separately from the SQL, so the database always
+        # treats them as plain data and never as SQL commands.
+        # NEVER paste values directly into the SQL text yourself.
+        #
+        # ON CONFLICT (message_id) DO NOTHING: if a message with this ID is
+        # already saved, skip it silently instead of raising an error.
+        await bot.db.execute(
+            """
+            INSERT INTO messages
+                (message_id, guild_id, channel_id, author_id,
+                 author_name, content, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (message_id) DO NOTHING
+            """,
+            message.id,             # $1 message ID
+            message.guild.id,       # $2 server ID
+            message.channel.id,     # $3 channel ID
+            message.author.id,      # $4 author ID
+            message.author.name,    # $5 author username
+            message.content,        # $6 message text
+            message.created_at,     # $7 time it was sent
+        )
+        print(f"Saved: {message.author.name}: {message.content}")
+    except Exception as e:
+        print(f"Failed to save message: {e}")
 
 
 # ---------------------------------------------------------
