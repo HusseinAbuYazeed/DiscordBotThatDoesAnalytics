@@ -1,4 +1,5 @@
 import os                          # to read environment variables (from .env)
+import asyncpg                     # library that talks to PostgreSQL
 import discord                     # the Discord library
 from discord import app_commands   # needed for slash commands (/)
 from dotenv import load_dotenv     # loads the .env file
@@ -25,10 +26,22 @@ class MyBot(discord.Client):
         # The "tree" is where our slash commands get stored.
         self.tree = app_commands.CommandTree(self)
 
+
+        # Placeholder for the database connection pool.
+        # It's None for now; we fill it in setup_hook below.
+        self.db = None
+
     async def setup_hook(self):
         """Runs once, before the bot starts receiving events."""
 
-        # Sync (send) our slash commands to Discord.
+
+        # 1) Connect to the database.
+        # A "pool" is a group of ready-made connections. It's better than
+        # opening a brand new connection for every single message.
+        self.db = await asyncpg.create_pool(os.environ["DATABASE_URL"])
+        print("Connected to database")
+
+        # 2) Sync (send) our slash commands to Discord.
         # Without a sync, the commands will not show up when you type "/".
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
@@ -42,6 +55,11 @@ class MyBot(discord.Client):
             # Can take a while to show up the first time.
             await self.tree.sync()
 
+    async def close(self):
+        """Runs when the bot shuts down: close the database connection cleanly."""
+        if self.db:
+            await self.db.close()
+        await super().close()    
 
 bot = MyBot()
 
