@@ -34,14 +34,36 @@ class MyBot(discord.Client):
     async def setup_hook(self):
         """Runs once, before the bot starts receiving events."""
 
-
         # 1) Connect to the database.
         # A "pool" is a group of ready-made connections. It's better than
         # opening a brand new connection for every single message.
         self.db = await asyncpg.create_pool(os.environ["DATABASE_URL"])
         print("Connected to database")
 
-        # 2) Sync (send) our slash commands to Discord.
+        # 2) Create the messages table if it doesn't exist yet.
+        # Think of a table as an Excel sheet: each column is a piece of info,
+        # and each row will be one Discord message.
+        #
+        # IF NOT EXISTS -> if the table is already there, do nothing (no error).
+        # BIGINT        -> a big integer. Discord IDs are huge, a normal INT is too small.
+        # PRIMARY KEY   -> a unique ID per row; no two messages can share it.
+        # TEXT          -> a string of any length.
+        # TIMESTAMPTZ   -> date + time, with timezone.
+        # NOT NULL      -> this column can never be empty.
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                message_id  BIGINT PRIMARY KEY,
+                guild_id    BIGINT NOT NULL,
+                channel_id  BIGINT NOT NULL,
+                author_id   BIGINT NOT NULL,
+                author_name TEXT   NOT NULL,
+                content     TEXT   NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL
+            )
+        """)
+        print("Table 'messages' is ready")
+
+        # 3) Sync (send) our slash commands to Discord.
         # Without a sync, the commands will not show up when you type "/".
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
