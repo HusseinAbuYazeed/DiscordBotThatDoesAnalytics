@@ -32,6 +32,29 @@ async def init_schema(pool):
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ"
     )
 
+    # One row per (message, user, emoji): "this user reacted with this emoji
+    # on this message".
+    #
+    # PRIMARY KEY on all three columns together means the same person can't
+    # be saved twice with the same emoji on the same message.
+    #
+    # emoji is TEXT because it can be a normal emoji ("😂") or a custom
+    # server emoji (looks like "<:name:123456>").
+    #
+    # We do NOT link this table to the messages table on purpose: a reaction
+    # can arrive for an old message that we never saved, and we still want it.
+    #
+    # created_at is when WE saw the reaction (DEFAULT NOW() fills it in).
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS reactions (
+            message_id BIGINT NOT NULL,
+            guild_id   BIGINT NOT NULL,
+            user_id    BIGINT NOT NULL,
+            emoji      TEXT   NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (message_id, user_id, emoji)
+        )
+    """)
 
 async def save_message(pool, message):
     """Insert one Discord message as a new row."""
@@ -72,4 +95,33 @@ async def mark_deleted(pool, message_id, deleted_at):
         "UPDATE messages SET deleted_at = $1 WHERE message_id = $2",
         deleted_at,
         message_id,
+    )
+
+async def add_reaction(pool, guild_id, message_id, user_id, emoji):
+    """Save that a user added a reaction to a message."""
+
+    # ON CONFLICT DO NOTHING: if this exact reaction is already saved, skip it.
+    await pool.execute(
+        """
+        INSERT INTO reactions (message_id, guild_id, user_id, emoji)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT DO NOTHING
+        """,
+        message_id,
+        guild_id,
+        user_id,
+        emoji,
+    )
+
+
+async def remove_reaction(pool, message_id, user_id, emoji):
+    """Forget a reaction, because the user removed it from the message."""
+
+    # Here we really DELETE the row: if the user took the reaction back,
+    # it no longer counts.
+    await pool.execute(
+        "DELETE FROM reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
+        message_id,
+        user_id,
+        emoji,
     )

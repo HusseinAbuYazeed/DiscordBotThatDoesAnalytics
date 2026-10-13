@@ -121,6 +121,53 @@ async def on_raw_message_delete(payload):
     except Exception as e:
         print(f"Failed to save delete: {e}")
 
+@bot.event
+async def on_raw_reaction_add(payload):
+    """Runs when ANY user adds a reaction to ANY message (even old ones)."""
+
+    # Ignore reactions in DMs (no server).
+    if payload.guild_id is None:
+        return
+
+    # payload.member is the person who reacted. Ignore bots.
+    if payload.member is not None and payload.member.bot:
+        return
+
+    try:
+        # str(payload.emoji) gives "😂" for a normal emoji,
+        # or "<:name:123456>" for a custom server emoji.
+        await database.add_reaction(
+            bot.pool,
+            payload.guild_id,
+            payload.message_id,
+            payload.user_id,
+            str(payload.emoji),
+        )
+        print(f"Reaction added: {payload.emoji} on {payload.message_id}")
+    except Exception as e:
+        print(f"Failed to save reaction: {e}")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    """Runs when a user removes their reaction from a message."""
+
+    if payload.guild_id is None:
+        return
+
+    try:
+        # If this reaction was never saved (for example a bot's reaction),
+        # DELETE simply matches nothing and that's fine.
+        await database.remove_reaction(
+            bot.pool,
+            payload.message_id,
+            payload.user_id,
+            str(payload.emoji),
+        )
+        print(f"Reaction removed: {payload.emoji} on {payload.message_id}")
+    except Exception as e:
+        print(f"Failed to remove reaction: {e}")
+
 
 # ---------------------------------------------------------
 # Slash commands
