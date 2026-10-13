@@ -1,24 +1,21 @@
 import os                          # to read environment variables (from .env)
-import asyncpg                     # library that talks to PostgreSQL
 import discord                     # the Discord library
 from discord import app_commands   # needed for slash commands (/)
 from dotenv import load_dotenv     # loads the .env file
 
-# Read the .env file so its values (token, guild id) become available
-# through os.environ / os.getenv.
-load_dotenv()
+import database                    # our own file: database.py
 
+# Read the .env file so its values become available through os.environ.
+load_dotenv()
 
 # Intents = permissions we ask Discord for.
 intents = discord.Intents.default()
 
-# Without this line, message.content comes back empty.
-# You must ALSO enable "Message Content Intent" in the Developer Portal
-# (Bot tab), otherwise it still won't work.
+# Without this, message.content comes back empty.
+# You must ALSO enable "Message Content Intent" in the Developer Portal.
 intents.message_content = True
 
 
-# bot class
 class MyBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
@@ -26,68 +23,40 @@ class MyBot(discord.Client):
         # The "tree" is where our slash commands get stored.
         self.tree = app_commands.CommandTree(self)
 
-
-        # Placeholder for the database connection pool.
-        # It's None for now; we fill it in setup_hook below.
-        self.db = None
+        # The database connection pool. It's None until setup_hook fills it.
+        self.pool = None
 
     async def setup_hook(self):
         """Runs once, before the bot starts receiving events."""
 
-        # 1) Connect to the database.
-        # A "pool" is a group of ready-made connections. It's better than
-        # opening a brand new connection for every single message.
-        self.db = await asyncpg.create_pool(os.environ["DATABASE_URL"])
-        print("Connected to database")
+        # 1) Connect to the database and make sure the table exists.
+        self.pool = await database.create_pool(os.environ["DATABASE_URL"])
+        await database.init_schema(self.pool)
+        print("Database is ready")
 
-        # 2) Create the messages table if it doesn't exist yet.
-        # Think of a table as an Excel sheet: each column is a piece of info,
-        # and each row will be one Discord message.
-        #
-        # IF NOT EXISTS -> if the table is already there, do nothing (no error).
-        # BIGINT        -> a big integer. Discord IDs are huge, a normal INT is too small.
-        # PRIMARY KEY   -> a unique ID per row; no two messages can share it.
-        # TEXT          -> a string of any length.
-        # TIMESTAMPTZ   -> date + time, with timezone.
-        # NOT NULL      -> this column can never be empty.
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                message_id  BIGINT PRIMARY KEY,
-                guild_id    BIGINT NOT NULL,
-                channel_id  BIGINT NOT NULL,
-                author_id   BIGINT NOT NULL,
-                author_name TEXT   NOT NULL,
-                content     TEXT   NOT NULL,
-                created_at  TIMESTAMPTZ NOT NULL
-            )
-        """)
-        print("Table 'messages' is ready")
-
-        # 3) Sync (send) our slash commands to Discord.
-        # Without a sync, the commands will not show up when you type "/".
+        # 2) Sync (send) our slash commands to Discord.
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
-            # GUILD_ID exists: register commands for that server only.
-            # They appear instantly, which is great while developing.
+            # Only for this server, appears instantly (good while developing).
             guild = discord.Object(id=int(guild_id))
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
         else:
-            # No GUILD_ID: register commands globally (all servers).
-            # Can take a while to show up the first time.
+            # For all servers, can take a while to show up.
             await self.tree.sync()
 
     async def close(self):
-        """Runs when the bot shuts down: close the database connection cleanly."""
-        if self.db:
-            await self.db.close()
-        await super().close()    
+        """Runs when the bot shuts down: close the database cleanly."""
+        if self.pool:
+            await self.pool.close()
+        await super().close()
+
 
 bot = MyBot()
 
 
 # ---------------------------------------------------------
-# Events = things that happen. We tell the bot what to do when they do.
+# Events
 # ---------------------------------------------------------
 @bot.event
 async def on_ready():
@@ -95,86 +64,71 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 
-# @bot.event
-# async def on_message(message):
-#     """Runs for EVERY new message the bot can see. This is the core of the project."""
-
-#     # Ignore messages written by bots (including our own bot).
-#     if message.author.bot:
-#         return
-
-#     # Ignore direct messages (DMs). We only want messages inside servers.
-#     if message.guild is None:
-#         return
-
-#     # For now we just print the message info in the terminal.
-#     # Later, instead of printing, we will save these same values in a database.
-#     print("-" * 40)
-#     print("Server:  ", message.guild.name, f"({message.guild.id})")
-#     print("Channel: ", message.channel.name, f"({message.channel.id})")
-#     print("Author:  ", message.author.name, f"({message.author.id})")
-#     print("Time:    ", message.created_at)
-#     print("Content: ", message.content)
-
-
 @bot.event
 async def on_message(message):
-    """Runs for EVERY new message the bot can see. This is the core of the project."""
+    """Runs for every new message the bot can see."""
 
-    # Ignore messages written by bots (including our own bot).
-    if message.author.bot:
+    # Ignore bots (including ourselves) and DMs.
+    if message.author.bot or message.guild is None:
         return
 
-    # Ignore direct messages (DMs). We only want messages inside servers.
-    if message.guild is None:
-        return
-
-    # Save the message in the database.
-    # try/except: if saving fails for any reason, we print the error
-    # instead of letting the whole bot crash.
+    # try/except: if saving fails, print the error instead of crashing the bot.
     try:
-        # INSERT INTO ... VALUES adds one new row to the table.
-        #
-        # $1, $2, ... are placeholders: empty slots that get filled with the
-        # values listed after the SQL text, in the same order ($1 = first value...).
-        # The values are sent separately from the SQL, so the database always
-        # treats them as plain data and never as SQL commands.
-        # NEVER paste values directly into the SQL text yourself.
-        #
-        # ON CONFLICT (message_id) DO NOTHING: if a message with this ID is
-        # already saved, skip it silently instead of raising an error.
-        await bot.db.execute(
-            """
-            INSERT INTO messages
-                (message_id, guild_id, channel_id, author_id,
-                 author_name, content, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (message_id) DO NOTHING
-            """,
-            message.id,             # $1 message ID
-            message.guild.id,       # $2 server ID
-            message.channel.id,     # $3 channel ID
-            message.author.id,      # $4 author ID
-            message.author.name,    # $5 author username
-            message.content,        # $6 message text
-            message.created_at,     # $7 time it was sent
-        )
+        await database.save_message(bot.pool, message)
         print(f"Saved: {message.author.name}: {message.content}")
     except Exception as e:
         print(f"Failed to save message: {e}")
 
 
+@bot.event
+async def on_raw_message_edit(payload):
+    """Runs when ANY message is edited, even old ones the bot never cached."""
+
+    if payload.guild_id is None:
+        return
+
+    # Discord also fires this when only a link preview changes.
+    # In that case there is no new text / edit time, so we skip it.
+    new_content = payload.data.get("content")
+    edited_ts = payload.data.get("edited_timestamp")
+    if new_content is None or edited_ts is None:
+        return
+
+    try:
+        await database.update_edit(
+            bot.pool,
+            payload.message_id,
+            new_content,
+            discord.utils.parse_time(edited_ts),
+        )
+        print(f"Edited: {payload.message_id}")
+    except Exception as e:
+        print(f"Failed to save edit: {e}")
+
+
+@bot.event
+async def on_raw_message_delete(payload):
+    """Runs when ANY message is deleted, even old ones the bot never cached."""
+
+    if payload.guild_id is None:
+        return
+
+    try:
+        await database.mark_deleted(
+            bot.pool, payload.message_id, discord.utils.utcnow()
+        )
+        print(f"Deleted: {payload.message_id}")
+    except Exception as e:
+        print(f"Failed to save delete: {e}")
+
+
 # ---------------------------------------------------------
-# Slash command (just to test that the bot is alive)
+# Slash commands
 # ---------------------------------------------------------
 @bot.tree.command(name="ping", description="Check that the bot is alive")
 async def ping(interaction: discord.Interaction):
-    # "interaction" represents the user running the command.
-    # We use it to reply to them.
     await interaction.response.send_message("pong")
 
 
-# ---------------------------------------------------------
-# Start the bot (always the last line)
-# ---------------------------------------------------------
+# Start the bot (always the last line).
 bot.run(os.environ["DISCORD_TOKEN"])
