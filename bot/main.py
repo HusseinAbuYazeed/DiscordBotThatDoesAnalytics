@@ -1,6 +1,6 @@
 import os                          # to read environment variables (from .env)
 import discord                     # the Discord library
-from discord import app_commands   # needed for slash commands (/)
+from discord.ext import commands   # commands.Bot is a Client that can load cogs
 from dotenv import load_dotenv     # loads the .env file
 
 import database                    # our own file: database.py
@@ -15,26 +15,39 @@ intents = discord.Intents.default()
 # You must ALSO enable "Message Content Intent" in the Developer Portal.
 intents.message_content = True
 
+# The cogs (files inside the cogs/ folder) that the bot should load.
+COGS = ["cogs.logger", "cogs.analytics"]
 
-class MyBot(discord.Client):
+
+class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(intents=intents)
-
-        # The "tree" is where our slash commands get stored.
-        self.tree = app_commands.CommandTree(self)
+        # commands.Bot requires a command_prefix for old-style "!" commands.
+        # We only use slash commands, so we set it to "mention the bot",
+        # which means it will basically never trigger.
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
         # The database connection pool. It's None until setup_hook fills it.
+        # Cogs reach it with self.bot.pool.
         self.pool = None
+
+        # NOTE: commands.Bot already creates self.tree for slash commands,
+        # so we must NOT create our own CommandTree here.
 
     async def setup_hook(self):
         """Runs once, before the bot starts receiving events."""
 
-        # 1) Connect to the database and make sure the table exists.
+        # 1) Connect to the database and make sure the tables exist.
         self.pool = await database.create_pool(os.environ["DATABASE_URL"])
         await database.init_schema(self.pool)
         print("Database is ready")
 
-        # 2) Sync (send) our slash commands to Discord.
+        # 2) Load every cog. This is what registers their events and commands.
+        for cog in COGS:
+            await self.load_extension(cog)
+            print(f"Loaded {cog}")
+
+        # 3) Sync (send) our slash commands to Discord.
+        # This must come AFTER loading the cogs, because the commands live in them.
         guild_id = os.getenv("GUILD_ID")
         if guild_id:
             # Only for this server, appears instantly (good while developing).
@@ -45,6 +58,10 @@ class MyBot(discord.Client):
             # For all servers, can take a while to show up.
             await self.tree.sync()
 
+    async def on_ready(self):
+        """Runs when the bot has successfully connected to Discord."""
+        print(f"Logged in as {self.user}")
+
     async def close(self):
         """Runs when the bot shuts down: close the database cleanly."""
         if self.pool:
@@ -53,129 +70,4 @@ class MyBot(discord.Client):
 
 
 bot = MyBot()
-
-
-# ---------------------------------------------------------
-# Events
-# ---------------------------------------------------------
-@bot.event
-async def on_ready():
-    """Runs when the bot has successfully connected to Discord."""
-    print(f"Logged in as {bot.user}")
-
-
-@bot.event
-async def on_message(message):
-    """Runs for every new message the bot can see."""
-
-    # Ignore bots (including ourselves) and DMs.
-    if message.author.bot or message.guild is None:
-        return
-
-    # try/except: if saving fails, print the error instead of crashing the bot.
-    try:
-        await database.save_message(bot.pool, message)
-        print(f"Saved: {message.author.name}: {message.content}")
-    except Exception as e:
-        print(f"Failed to save message: {e}")
-
-
-@bot.event
-async def on_raw_message_edit(payload):
-    """Runs when ANY message is edited, even old ones the bot never cached."""
-
-    if payload.guild_id is None:
-        return
-
-    # Discord also fires this when only a link preview changes.
-    # In that case there is no new text / edit time, so we skip it.
-    new_content = payload.data.get("content")
-    edited_ts = payload.data.get("edited_timestamp")
-    if new_content is None or edited_ts is None:
-        return
-
-    try:
-        await database.update_edit(
-            bot.pool,
-            payload.message_id,
-            new_content,
-            discord.utils.parse_time(edited_ts),
-        )
-        print(f"Edited: {payload.message_id}")
-    except Exception as e:
-        print(f"Failed to save edit: {e}")
-
-
-@bot.event
-async def on_raw_message_delete(payload):
-    """Runs when ANY message is deleted, even old ones the bot never cached."""
-
-    if payload.guild_id is None:
-        return
-
-    try:
-        await database.mark_deleted(
-            bot.pool, payload.message_id, discord.utils.utcnow()
-        )
-        print(f"Deleted: {payload.message_id}")
-    except Exception as e:
-        print(f"Failed to save delete: {e}")
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    """Runs when ANY user adds a reaction to ANY message (even old ones)."""
-
-    # Ignore reactions in DMs (no server).
-    if payload.guild_id is None:
-        return
-
-    # payload.member is the person who reacted. Ignore bots.
-    if payload.member is not None and payload.member.bot:
-        return
-
-    try:
-        # str(payload.emoji) gives "😂" for a normal emoji,
-        # or "<:name:123456>" for a custom server emoji.
-        await database.add_reaction(
-            bot.pool,
-            payload.guild_id,
-            payload.message_id,
-            payload.user_id,
-            str(payload.emoji),
-        )
-        print(f"Reaction added: {payload.emoji} on {payload.message_id}")
-    except Exception as e:
-        print(f"Failed to save reaction: {e}")
-
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    """Runs when a user removes their reaction from a message."""
-
-    if payload.guild_id is None:
-        return
-
-    try:
-        # If this reaction was never saved (for example a bot's reaction),
-        # DELETE simply matches nothing and that's fine.
-        await database.remove_reaction(
-            bot.pool,
-            payload.message_id,
-            payload.user_id,
-            str(payload.emoji),
-        )
-        print(f"Reaction removed: {payload.emoji} on {payload.message_id}")
-    except Exception as e:
-        print(f"Failed to remove reaction: {e}")
-
-
-# ---------------------------------------------------------
-# Slash commands
-# ---------------------------------------------------------
-@bot.tree.command(name="ping", description="Check that the bot is alive")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("pong")
-
-
-# Start the bot (always the last line).
 bot.run(os.environ["DISCORD_TOKEN"])

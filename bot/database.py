@@ -57,16 +57,23 @@ async def init_schema(pool):
     """)
 
 async def save_message(pool, message):
-    """Insert one Discord message as a new row."""
+    """Insert one Discord message as a new row.
 
-    # $1, $2, ... are placeholders filled with the values after the SQL text.
-    # ON CONFLICT DO NOTHING: skip silently if this message is already saved.
-    await pool.execute(
+    Returns True if a new row was saved, False if it was already saved before.
+    """
+
+    # execute() returns a status text like "INSERT 0 1" (one row added)
+    # or "INSERT 0 0" (nothing added, because ON CONFLICT skipped it).
+    #
+    # edited_at: for brand new messages it is None (empty). For old messages
+    # we get from the history, Discord tells us if they were edited, and
+    # when, so we save that too.
+    status = await pool.execute(
         """
         INSERT INTO messages
             (message_id, guild_id, channel_id, author_id,
-             author_name, content, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+             author_name, content, created_at, edited_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (message_id) DO NOTHING
         """,
         message.id,
@@ -76,8 +83,9 @@ async def save_message(pool, message):
         message.author.name,
         message.content,
         message.created_at,
+        message.edited_at,
     )
-
+    return status.endswith(" 1")
 
 async def update_edit(pool, message_id, new_content, edited_at):
     """Overwrite the text of a message and remember when it was edited."""
