@@ -202,7 +202,6 @@ class Logger(commands.Cog):
             f"Done. Saved {saved} new messages, skipped {skipped} that were already saved."
         )
 
-
 async def setup(bot):
     """discord.py calls this when the cog file is loaded."""
     await bot.add_cog(Logger(bot))

@@ -5,7 +5,6 @@ async def create_pool(database_url):
     """Open a pool of database connections and return it."""
     return await asyncpg.create_pool(database_url)
 
-
 async def init_schema(pool):
     """Create the table (and add newer columns) if they don't exist yet."""
 
@@ -56,24 +55,47 @@ async def init_schema(pool):
         )
     """)
 
+    # reply_to_id: the ID of the message this one is a reply to.
+    # It stays empty (NULL) if the message is not a reply.
+    await pool.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id BIGINT"
+    )
+
+    # has_attachment: TRUE if the message has an uploaded file or image.
+    # Notice there is NO default value on purpose. For the old messages we
+    # saved before this column existed, we don't know the answer, so they
+    # stay NULL ("unknown") instead of a wrong FALSE ("no attachment").
+    await pool.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS has_attachment BOOLEAN"
+    )
+
 async def save_message(pool, message):
     """Insert one Discord message as a new row.
 
     Returns True if a new row was saved, False if it was already saved before.
     """
 
-    # execute() returns a status text like "INSERT 0 1" (one row added)
-    # or "INSERT 0 0" (nothing added, because ON CONFLICT skipped it).
-    #
-    # edited_at: for brand new messages it is None (empty). For old messages
-    # we get from the history, Discord tells us if they were edited, and
-    # when, so we save that too.
+    # If this message is a reply, message.reference points to the original
+    # message. Otherwise message.reference is None.
+    # The extra "message.reference is not None" check avoids an error
+    # for normal messages.
+    reply_to_id = None
+    if message.reference is not None:
+        reply_to_id = message.reference.message_id
+
+    # message.attachments is a list of uploaded files. An empty list means
+    # no files, so bool([]) is False and bool([file]) is True.
+    # (Links and GIFs from sites are "embeds", not attachments, so they
+    # don't count here.)
+    has_attachment = bool(message.attachments)
+
     status = await pool.execute(
         """
         INSERT INTO messages
             (message_id, guild_id, channel_id, author_id,
-             author_name, content, created_at, edited_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             author_name, content, created_at, edited_at,
+             reply_to_id, has_attachment)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (message_id) DO NOTHING
         """,
         message.id,
@@ -84,6 +106,8 @@ async def save_message(pool, message):
         message.content,
         message.created_at,
         message.edited_at,
+        reply_to_id,
+        has_attachment,
     )
     return status.endswith(" 1")
 
