@@ -133,3 +133,50 @@ async def remove_reaction(pool, message_id, user_id, emoji):
         user_id,
         emoji,
     )
+
+async def get_message_texts(pool, guild_id, days):
+    """Return the text of every saved message of a server in the last N days."""
+
+    # We only need the text, so we select just the content column.
+    # deleted_at IS NULL -> skip messages that were deleted.
+    rows = await pool.fetch(
+        """
+        SELECT content
+        FROM messages
+        WHERE guild_id = $1
+          AND deleted_at IS NULL
+          AND created_at > NOW() - make_interval(days => $2)
+        """,
+        guild_id,
+        days,
+    )
+
+    # fetch() returns row objects. We turn them into a plain list of strings.
+    return [row["content"] for row in rows]
+
+async def top_chatters(pool, guild_id, days, limit):
+    """Return the most active members of a server in the last N days."""
+
+    # COUNT(*) counts the rows (= number of messages).
+    # GROUP BY author_id makes ONE row per person instead of one per message.
+    # MAX(author_name) picks one name per person (names can change over time).
+    # ORDER BY total DESC puts the biggest count first.
+    # LIMIT $3 returns only the first N rows.
+    # deleted_at IS NULL skips messages that were deleted.
+    return await pool.fetch(
+        """
+        SELECT MAX(author_name) AS author_name, COUNT(*) AS total
+        FROM messages
+        WHERE guild_id = $1
+          AND deleted_at IS NULL
+          AND created_at > NOW() - make_interval(days => $2)
+        GROUP BY author_id
+        ORDER BY total DESC
+        LIMIT $3
+        """,
+        guild_id,
+        days,
+        limit,
+    )
+
+

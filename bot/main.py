@@ -45,7 +45,7 @@ class MyBot(commands.Bot):
         for cog in COGS:
             await self.load_extension(cog)
             print(f"Loaded {cog}")
-
+            
         # 3) Sync (send) our slash commands to Discord.
         # This must come AFTER loading the cogs, because the commands live in them.
         guild_id = os.getenv("GUILD_ID")
@@ -53,10 +53,14 @@ class MyBot(commands.Bot):
             # Only for this server, appears instantly (good while developing).
             guild = discord.Object(id=int(guild_id))
             self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
+
+            # sync() returns the list of commands Discord accepted.
+            synced = await self.tree.sync(guild=guild)
+            print(f"Synced to guild {guild_id}: {[c.name for c in synced]}")
         else:
             # For all servers, can take a while to show up.
-            await self.tree.sync()
+            synced = await self.tree.sync()
+            print(f"Synced globally: {[c.name for c in synced]}")
 
     async def on_ready(self):
         """Runs when the bot has successfully connected to Discord."""
