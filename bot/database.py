@@ -120,7 +120,6 @@ async def update_edit(pool, message_id, new_content, edited_at):
         message_id,
     )
 
-
 async def mark_deleted(pool, message_id, deleted_at):
     """Mark a message as deleted. We keep the row, we only set deleted_at."""
     await pool.execute(
@@ -144,7 +143,6 @@ async def add_reaction(pool, guild_id, message_id, user_id, emoji):
         user_id,
         emoji,
     )
-
 
 async def remove_reaction(pool, message_id, user_id, emoji):
     """Forget a reaction, because the user removed it from the message."""
@@ -203,4 +201,113 @@ async def top_chatters(pool, guild_id, days, limit):
         limit,
     )
 
+async def user_stats(pool, guild_id, user_id, days):
+    """Return simple statistics about ONE user in the last N days."""
 
+    # COUNT(*)          -> number of messages
+    # AVG(LENGTH(...))  -> average message length, in characters
+    # MAX(LENGTH(...))  -> length of the longest message
+    # fetchrow() returns ONE row (fetch() returns many).
+    # If the user has no messages, COUNT is 0 and AVG/MAX are None.
+    totals = await pool.fetchrow(
+        """
+        SELECT COUNT(*) AS total,
+               AVG(LENGTH(content)) AS avg_length,
+               MAX(LENGTH(content)) AS longest
+        FROM messages
+        WHERE guild_id = $1
+          AND author_id = $2
+          AND deleted_at IS NULL
+          AND created_at > NOW() - make_interval(days => $3)
+        """,
+        guild_id,
+        user_id,
+        days,
+    )
+
+    # Busiest hour of the day.
+    # created_at is stored in UTC. "AT TIME ZONE 'Africa/Cairo'" converts it
+    # to Cairo time first, and EXTRACT(HOUR ...) takes just the hour (0-23).
+    # We group by hour, count the messages in each, and keep the biggest one.
+    busiest = await pool.fetchrow(
+        """
+        SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'Africa/Cairo')::int AS hour,
+               COUNT(*) AS total
+        FROM messages
+        WHERE guild_id = $1
+          AND author_id = $2
+          AND deleted_at IS NULL
+          AND created_at > NOW() - make_interval(days => $3)
+        GROUP BY hour
+        ORDER BY total DESC
+        LIMIT 1
+        """,
+        guild_id,
+        user_id,
+        days,
+    )
+
+    return {
+        "total": totals["total"],
+        "avg_length": totals["avg_length"],
+        "longest": totals["longest"],
+        # busiest is None when the user has no messages at all.
+        "busiest_hour": busiest["hour"] if busiest else None,
+    }
+
+async def get_user_texts(pool, guild_id, user_id, days):
+    """Return the text of every message of ONE user in the last N days."""
+
+    rows = await pool.fetch(
+        """
+        SELECT content
+        FROM messages
+        WHERE guild_id = $1
+          AND author_id = $2
+          AND deleted_at IS NULL
+          AND created_at > NOW() - make_interval(days => $3)
+        """,
+        guild_id,
+        user_id,
+        days,
+    )
+    return [row["content"] for row in rows]
+
+async def top_jokes(pool, guild_id, days, laugh_emojis, min_laughs, limit):
+    """Return the messages that made the most DIFFERENT people laugh."""
+
+    # JOIN glues two tables together: each reaction row gets matched with its
+    # message row (m.message_id = r.message_id). Reactions on messages we never
+    # saved have no match, so they simply disappear from the result.
+    #
+    # r.emoji = ANY($2)       -> the emoji must be one of the laugh emojis in the list
+    # r.user_id <> m.author_id -> ignore people laughing at their OWN message
+    # COUNT(DISTINCT r.user_id) -> count each PERSON once, even if they added
+    #                              two different laugh emojis to the same message
+    # GROUP BY m.message_id   -> one result row per message
+    # HAVING ... >= $5        -> keep only messages with at least N laughers
+    #                            (HAVING is like WHERE, but it runs AFTER counting)
+    # ORDER BY laughs DESC    -> most laughed-at first
+    return await pool.fetch(
+        """
+        SELECT m.message_id, m.channel_id, m.guild_id, m.author_name,
+               m.content, m.has_attachment,
+               COUNT(DISTINCT r.user_id) AS laughs
+        FROM reactions r
+        JOIN messages m ON m.message_id = r.message_id
+        WHERE m.guild_id = $1
+          AND m.deleted_at IS NULL
+          AND m.created_at > NOW() - make_interval(days => $3)
+          AND r.emoji = ANY($2)
+          AND r.user_id <> m.author_id
+        GROUP BY m.message_id
+        HAVING COUNT(DISTINCT r.user_id) >= $5
+        ORDER BY laughs DESC
+        LIMIT $4
+        """,
+        guild_id,
+        laugh_emojis,   # a normal Python list, asyncpg converts it for us
+        days,
+        limit,
+        min_laughs,
+    )
